@@ -138,7 +138,7 @@
             font-size: 2.8rem;
             font-weight: 400;
             color: #D4AF37;
-            letter-spacing: 0.08em;
+            letter-spacing: -0.01em;
             margin-bottom: 3rem;
             text-shadow: 0 0 40px rgba(212, 175, 55, 0.5);
             overflow: hidden;
@@ -175,7 +175,6 @@
 
         .detail-item.location {
             margin-top: 1.5rem;
-            font-style: italic;
         }
 
         .divider {
@@ -331,6 +330,13 @@
         let windowHalfX = window.innerWidth / 2;
         let windowHalfY = window.innerHeight / 2;
 
+        // Raycaster for click detection
+        const raycaster = new THREE.Raycaster();
+        const clickMouse = new THREE.Vector2();
+
+        // Spark systems for bullet impacts
+        let sparkSystems = [];
+
         // Cursor elements
         const cursor = document.getElementById('cursor');
         const cursorGlow = document.getElementById('cursor-glow');
@@ -372,6 +378,7 @@
 
             // Event listeners
             document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('click', onChipClick);
             window.addEventListener('resize', onWindowResize);
 
             // Setup text animation
@@ -456,7 +463,12 @@
                     floatOffset: Math.random() * Math.PI * 2,
                     floatSpeed: 0.3 + Math.random() * 0.4,
                     floatAmplitude: 0.5 + Math.random() * 1,
-                    magnetStrength: 0.02 + Math.random() * 0.03
+                    magnetStrength: 0.02 + Math.random() * 0.03,
+                    // Bullet hit state
+                    isHit: false,
+                    hitTime: 0,
+                    hitVelocity: { x: 0, y: 0, z: 0 },
+                    hitSpin: { x: 0, y: 0, z: 0 }
                 };
 
                 chips.push(chip);
@@ -554,7 +566,12 @@
                     floatOffset: Math.random() * Math.PI * 2,
                     floatSpeed: 0.2 + Math.random() * 0.3,
                     floatAmplitude: 0.3 + Math.random() * 0.6,
-                    magnetStrength: 0.015 + Math.random() * 0.02
+                    magnetStrength: 0.015 + Math.random() * 0.02,
+                    // Bullet hit state
+                    isHit: false,
+                    hitTime: 0,
+                    hitVelocity: { x: 0, y: 0, z: 0 },
+                    hitSpin: { x: 0, y: 0, z: 0 }
                 };
 
                 cards.push(card);
@@ -737,12 +754,35 @@
             const text = title.textContent;
             title.textContent = '';
 
-            for (let i = 0; i < text.length; i++) {
-                const span = document.createElement('span');
-                span.textContent = text[i] === ' ' ? '\u00A0' : text[i];
-                span.style.animationDelay = `${2 + i * 0.05}s`;
-                title.appendChild(span);
-            }
+            const words = text.split(' ');
+            let charIndex = 0;
+
+            words.forEach((word, wordIndex) => {
+                // Create a wrapper span for each word to prevent breaking
+                const wordSpan = document.createElement('span');
+                wordSpan.style.display = 'inline-block';
+                wordSpan.style.whiteSpace = 'nowrap';
+
+                // Add each letter inside the word wrapper
+                for (let i = 0; i < word.length; i++) {
+                    const letterSpan = document.createElement('span');
+                    letterSpan.textContent = word[i];
+                    letterSpan.style.animationDelay = `${2 + charIndex * 0.05}s`;
+                    wordSpan.appendChild(letterSpan);
+                    charIndex++;
+                }
+
+                title.appendChild(wordSpan);
+
+                // Add space between words (except after the last word)
+                if (wordIndex < words.length - 1) {
+                    const spaceSpan = document.createElement('span');
+                    spaceSpan.innerHTML = '&nbsp;';
+                    spaceSpan.style.animationDelay = `${2 + charIndex * 0.05}s`;
+                    title.appendChild(spaceSpan);
+                    charIndex++;
+                }
+            });
         }
 
         function onMouseMove(event) {
@@ -765,6 +805,179 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
         }
 
+        function onChipClick(event) {
+            // Calculate mouse position in normalized device coordinates
+            clickMouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            clickMouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            // Update the raycaster
+            raycaster.setFromCamera(clickMouse, camera);
+
+            // Get all chip and card meshes for intersection testing
+            const targetMeshes = [];
+
+            chips.forEach(chip => {
+                chip.traverse(child => {
+                    if (child.isMesh) {
+                        child.userData.parentObject = chip;
+                        child.userData.objectType = 'chip';
+                        targetMeshes.push(child);
+                    }
+                });
+            });
+
+            cards.forEach(card => {
+                card.traverse(child => {
+                    if (child.isMesh) {
+                        child.userData.parentObject = card;
+                        child.userData.objectType = 'card';
+                        targetMeshes.push(child);
+                    }
+                });
+            });
+
+            // Check for intersections
+            const intersects = raycaster.intersectObjects(targetMeshes);
+
+            if (intersects.length > 0) {
+                const hitPoint = intersects[0].point;
+                const hitObject = intersects[0].object.userData.parentObject;
+
+                if (hitObject && !hitObject.userData.isHit) {
+                    // Trigger bullet hit effect
+                    bulletHitObject(hitObject, hitPoint);
+                    // Create sparks at impact point
+                    createSparks(hitPoint);
+                }
+            }
+        }
+
+        function bulletHitObject(obj, hitPoint) {
+            const data = obj.userData;
+            data.isHit = true;
+            data.hitTime = Date.now();
+
+            // Calculate hit direction (from camera)
+            const direction = new THREE.Vector3();
+            direction.subVectors(hitPoint, camera.position).normalize();
+
+            // Apply violent velocity (knocked back by bullet)
+            const force = 15 + Math.random() * 10;
+            data.hitVelocity = {
+                x: direction.x * force + (Math.random() - 0.5) * 5,
+                y: direction.y * force + Math.random() * 8, // Upward bias
+                z: direction.z * force + (Math.random() - 0.5) * 5
+            };
+
+            // Apply violent spin
+            data.hitSpin = {
+                x: (Math.random() - 0.5) * 2,
+                y: (Math.random() - 0.5) * 2,
+                z: (Math.random() - 0.5) * 2
+            };
+        }
+
+        function createSparks(position) {
+            const sparkCount = 30;
+            const positions = new Float32Array(sparkCount * 3);
+            const velocities = [];
+            const colors = new Float32Array(sparkCount * 3);
+
+            const goldColor = new THREE.Color(0xFFD700);
+            const orangeColor = new THREE.Color(0xFF6600);
+            const whiteColor = new THREE.Color(0xFFFFFF);
+
+            for (let i = 0; i < sparkCount; i++) {
+                // Start at impact point
+                positions[i * 3] = position.x;
+                positions[i * 3 + 1] = position.y;
+                positions[i * 3 + 2] = position.z;
+
+                // Random velocity in all directions
+                velocities.push({
+                    x: (Math.random() - 0.5) * 20,
+                    y: (Math.random() - 0.5) * 20,
+                    z: (Math.random() - 0.5) * 20
+                });
+
+                // Random spark colors (gold, orange, white)
+                const colorChoice = Math.random();
+                const color = colorChoice < 0.5 ? goldColor : (colorChoice < 0.8 ? orangeColor : whiteColor);
+                colors[i * 3] = color.r;
+                colors[i * 3 + 1] = color.g;
+                colors[i * 3 + 2] = color.b;
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            const material = new THREE.PointsMaterial({
+                size: 0.15,
+                vertexColors: true,
+                transparent: true,
+                opacity: 1,
+                blending: THREE.AdditiveBlending,
+                sizeAttenuation: true
+            });
+
+            const sparks = new THREE.Points(geometry, material);
+            sparks.userData = {
+                velocities: velocities,
+                birthTime: Date.now(),
+                lifetime: 800 // milliseconds
+            };
+
+            scene.add(sparks);
+            sparkSystems.push(sparks);
+        }
+
+        function updateSparks() {
+            const now = Date.now();
+
+            for (let i = sparkSystems.length - 1; i >= 0; i--) {
+                const sparks = sparkSystems[i];
+                const data = sparks.userData;
+                const age = now - data.birthTime;
+
+                if (age > data.lifetime) {
+                    // Remove expired sparks
+                    scene.remove(sparks);
+                    sparks.geometry.dispose();
+                    sparks.material.dispose();
+                    sparkSystems.splice(i, 1);
+                    continue;
+                }
+
+                // Update spark positions
+                const positions = sparks.geometry.attributes.position.array;
+                const velocities = data.velocities;
+                const progress = age / data.lifetime;
+
+                // Fade out
+                sparks.material.opacity = 1 - progress;
+
+                for (let j = 0; j < velocities.length; j++) {
+                    const vel = velocities[j];
+
+                    // Apply velocity with gravity and drag
+                    positions[j * 3] += vel.x * 0.016;
+                    positions[j * 3 + 1] += vel.y * 0.016;
+                    positions[j * 3 + 2] += vel.z * 0.016;
+
+                    // Apply gravity
+                    vel.y -= 0.5;
+
+                    // Apply drag
+                    vel.x *= 0.98;
+                    vel.y *= 0.98;
+                    vel.z *= 0.98;
+                }
+
+                sparks.geometry.attributes.position.needsUpdate = true;
+            }
+        }
+
         function animate() {
             requestAnimationFrame(animate);
 
@@ -783,42 +996,112 @@
             chips.forEach((chip, index) => {
                 const data = chip.userData;
 
-                // Rotation
-                chip.rotation.x += data.rotationSpeed.x;
-                chip.rotation.y += data.rotationSpeed.y;
-                chip.rotation.z += data.rotationSpeed.z;
+                if (data.isHit) {
+                    // Bullet hit animation
+                    const hitAge = (Date.now() - data.hitTime) / 1000;
+                    const recoveryTime = 3; // seconds to recover
 
-                // Floating motion
-                const floatY = Math.sin(time * data.floatSpeed + data.floatOffset) * data.floatAmplitude;
-                const floatX = Math.cos(time * data.floatSpeed * 0.5 + data.floatOffset) * data.floatAmplitude * 0.5;
+                    if (hitAge < recoveryTime) {
+                        // Apply hit velocity with decay
+                        const decay = Math.exp(-hitAge * 2);
 
-                // Magnetic attraction to cursor
-                const magnetX = mouseX * 10 * data.magnetStrength * (30 - Math.abs(chip.position.z));
-                const magnetY = -mouseY * 8 * data.magnetStrength * (30 - Math.abs(chip.position.z));
+                        chip.position.x += data.hitVelocity.x * 0.016 * decay;
+                        chip.position.y += data.hitVelocity.y * 0.016 * decay;
+                        chip.position.z += data.hitVelocity.z * 0.016 * decay;
 
-                chip.position.x = data.originalPos.x + floatX + magnetX;
-                chip.position.y = data.originalPos.y + floatY + magnetY;
+                        // Apply gravity to velocity
+                        data.hitVelocity.y -= 15 * 0.016;
+
+                        // Violent spin
+                        chip.rotation.x += data.hitSpin.x * decay;
+                        chip.rotation.y += data.hitSpin.y * decay;
+                        chip.rotation.z += data.hitSpin.z * decay;
+
+                        // Gradually return to original position
+                        const returnStrength = hitAge / recoveryTime * 0.02;
+                        chip.position.x += (data.originalPos.x - chip.position.x) * returnStrength;
+                        chip.position.y += (data.originalPos.y - chip.position.y) * returnStrength;
+                        chip.position.z += (data.originalPos.z - chip.position.z) * returnStrength;
+                    } else {
+                        // Recovery complete
+                        data.isHit = false;
+                        data.hitVelocity = { x: 0, y: 0, z: 0 };
+                        data.hitSpin = { x: 0, y: 0, z: 0 };
+                    }
+                } else {
+                    // Normal floating animation
+                    // Rotation
+                    chip.rotation.x += data.rotationSpeed.x;
+                    chip.rotation.y += data.rotationSpeed.y;
+                    chip.rotation.z += data.rotationSpeed.z;
+
+                    // Floating motion
+                    const floatY = Math.sin(time * data.floatSpeed + data.floatOffset) * data.floatAmplitude;
+                    const floatX = Math.cos(time * data.floatSpeed * 0.5 + data.floatOffset) * data.floatAmplitude * 0.5;
+
+                    // Magnetic attraction to cursor
+                    const magnetX = mouseX * 10 * data.magnetStrength * (30 - Math.abs(chip.position.z));
+                    const magnetY = -mouseY * 8 * data.magnetStrength * (30 - Math.abs(chip.position.z));
+
+                    chip.position.x = data.originalPos.x + floatX + magnetX;
+                    chip.position.y = data.originalPos.y + floatY + magnetY;
+                }
             });
 
             // Animate cards
             cards.forEach((card, index) => {
                 const data = card.userData;
 
-                // Slow tumble
-                card.rotation.x += data.tumbleSpeed.x;
-                card.rotation.y += data.tumbleSpeed.y;
-                card.rotation.z += data.tumbleSpeed.z;
+                if (data.isHit) {
+                    // Bullet hit animation
+                    const hitAge = (Date.now() - data.hitTime) / 1000;
+                    const recoveryTime = 3; // seconds to recover
 
-                // Floating
-                const floatY = Math.sin(time * data.floatSpeed + data.floatOffset) * data.floatAmplitude;
-                const floatX = Math.cos(time * data.floatSpeed * 0.7 + data.floatOffset) * data.floatAmplitude * 0.3;
+                    if (hitAge < recoveryTime) {
+                        // Apply hit velocity with decay
+                        const decay = Math.exp(-hitAge * 2);
 
-                // Magnetic effect
-                const magnetX = mouseX * 8 * data.magnetStrength * (25 - Math.abs(card.position.z));
-                const magnetY = -mouseY * 6 * data.magnetStrength * (25 - Math.abs(card.position.z));
+                        card.position.x += data.hitVelocity.x * 0.016 * decay;
+                        card.position.y += data.hitVelocity.y * 0.016 * decay;
+                        card.position.z += data.hitVelocity.z * 0.016 * decay;
 
-                card.position.x = data.originalPos.x + floatX + magnetX;
-                card.position.y = data.originalPos.y + floatY + magnetY;
+                        // Apply gravity to velocity
+                        data.hitVelocity.y -= 15 * 0.016;
+
+                        // Violent spin
+                        card.rotation.x += data.hitSpin.x * decay;
+                        card.rotation.y += data.hitSpin.y * decay;
+                        card.rotation.z += data.hitSpin.z * decay;
+
+                        // Gradually return to original position
+                        const returnStrength = hitAge / recoveryTime * 0.02;
+                        card.position.x += (data.originalPos.x - card.position.x) * returnStrength;
+                        card.position.y += (data.originalPos.y - card.position.y) * returnStrength;
+                        card.position.z += (data.originalPos.z - card.position.z) * returnStrength;
+                    } else {
+                        // Recovery complete
+                        data.isHit = false;
+                        data.hitVelocity = { x: 0, y: 0, z: 0 };
+                        data.hitSpin = { x: 0, y: 0, z: 0 };
+                    }
+                } else {
+                    // Normal animation
+                    // Slow tumble
+                    card.rotation.x += data.tumbleSpeed.x;
+                    card.rotation.y += data.tumbleSpeed.y;
+                    card.rotation.z += data.tumbleSpeed.z;
+
+                    // Floating
+                    const floatY = Math.sin(time * data.floatSpeed + data.floatOffset) * data.floatAmplitude;
+                    const floatX = Math.cos(time * data.floatSpeed * 0.7 + data.floatOffset) * data.floatAmplitude * 0.3;
+
+                    // Magnetic effect
+                    const magnetX = mouseX * 8 * data.magnetStrength * (25 - Math.abs(card.position.z));
+                    const magnetY = -mouseY * 6 * data.magnetStrength * (25 - Math.abs(card.position.z));
+
+                    card.position.x = data.originalPos.x + floatX + magnetX;
+                    card.position.y = data.originalPos.y + floatY + magnetY;
+                }
             });
 
             // Animate particles
@@ -837,6 +1120,9 @@
                 particles.geometry.attributes.position.needsUpdate = true;
                 particles.rotation.y = time * 0.02;
             }
+
+            // Update spark effects
+            updateSparks();
 
             renderer.render(scene, camera);
         }
